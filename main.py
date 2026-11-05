@@ -13,7 +13,8 @@ Estructura de carpetas:
             chart.txt            (se crea solo si no existe)
 
 Menu:    flechas arriba/abajo o carril 1/2  |  Enter o carril 3 = jugar
-         R o carril 5 = grabar chart de la cancion elegida  |  ESC = salir
+         R o carril 5 = grabar chart de la cancion elegida  |  E = editor de charts (editor.py)
+         ESC = salir
 Juego:   flechas IZQ/DER ajustan el offset (se guarda al terminar)  |  ESC = volver al menu
 Teclado si no hay Arduino: A S D F G
 """
@@ -133,8 +134,10 @@ def cargar_chart(cancion):
             linea = linea.strip()
             if not linea or linea.startswith("#"):
                 continue
-            beat, carril = linea.split()[:2]
-            notas.append([float(beat), int(carril), None])
+            partes = linea.split()
+            dur = float(partes[2]) if len(partes) > 2 else 0.0
+            # [beat, carril, estado, duracion_en_beats, sosteniendo]
+            notas.append([float(partes[0]), int(partes[1]), None, dur, False])
     notas.sort()
     return notas
 
@@ -210,6 +213,8 @@ def menu(ctx, canciones, puntajes):
                     accion = "jugar"
                 elif e.key == pygame.K_r:
                     accion = "grabar"
+                elif e.key == pygame.K_e:
+                    accion = "editar"
         for c in pulsados:
             if c == 0:
                 sel -= 1
@@ -242,11 +247,11 @@ def menu(ctx, canciones, puntajes):
                 texto(ctx, detalle, ctx.chica, color, 50, y + 30)
 
         texto(ctx, "Arriba/abajo o carril 1/2: elegir   Enter o carril 3: jugar", ctx.chica, (170, 170, 190), ANCHO // 2, ALTO - 70, True)
-        texto(ctx, "R o carril 5: grabar chart   ESC: salir", ctx.chica, (170, 170, 190), ANCHO // 2, ALTO - 40, True)
+        texto(ctx, "R o carril 5: grabar   E: editor de charts   ESC: salir", ctx.chica, (170, 170, 190), ANCHO // 2, ALTO - 40, True)
         pygame.display.flip()
 
         if accion and canciones:
-            return canciones[sel], accion == "grabar"
+            return canciones[sel], accion
 
 
 # ---------- Pantalla: juego ----------
@@ -272,10 +277,14 @@ def jugar(ctx, cancion, grabar):
     completo = False
     cerrar = False
     corriendo = True
+    t_prev = -LEAD
+    resto = 0.0   # puntos fraccionarios por mantener notas largas
 
     while corriendo:
         ctx.reloj.tick(120)
         t = time.perf_counter() - t0 - LEAD
+        dt = max(0.0, t - t_prev)
+        t_prev = t
         if not musica_ok and t >= 0:
             pygame.mixer.music.play()
             musica_ok = True
@@ -306,6 +315,7 @@ def jugar(ctx, cancion, grabar):
                 n = min(cand, key=lambda n: abs(offset + n[0] * seg_beat - t))
                 dif = abs(offset + n[0] * seg_beat - t)
                 n[2] = "hit"
+                n[4] = n[3] > 0   # si es nota larga, hay que mantenerla
                 combo += 1
                 max_combo = max(max_combo, combo)
                 if dif <= VENT_PERFECT:
@@ -321,6 +331,24 @@ def jugar(ctx, cancion, grabar):
                 combo = 0
 
         if not grabar:
+            for n in notas:
+                if n[4]:  # nota larga que se esta sosteniendo
+                    fin = offset + (n[0] + n[3]) * seg_beat
+                    if t >= fin or (not ctx.entrada.estado[n[1]] and t >= fin - 0.1):
+                        n[4] = False
+                        n[2] = "completa"
+                        puntaje += 20
+                        mensaje, t_mensaje = "Sostenida!", time.perf_counter()
+                    elif not ctx.entrada.estado[n[1]]:
+                        n[4] = False
+                        n[2] = "soltada"
+                        combo = 0
+                        mensaje, t_mensaje = "Soltaste", time.perf_counter()
+                    else:
+                        resto += 25 * dt
+                        if resto >= 1:
+                            puntaje += int(resto)
+                            resto -= int(resto)
             for n in notas:
                 if n[2] is None and offset + n[0] * seg_beat < t - VENT_BUENO:
                     n[2] = "miss"
@@ -340,13 +368,23 @@ def jugar(ctx, cancion, grabar):
             relleno = 0 if ctx.entrada.estado[i] else 3
             pygame.draw.circle(ctx.pantalla, COLORES[i], (x + ancho_carril // 2, LINEA_GOLPE), 28, relleno)
         if not grabar:
-            for beat, carril, estado in notas:
-                if estado is not None:
+            for n in notas:
+                activa = n[2] is None or (n[2] == "hit" and n[4])
+                if not activa:
                     continue
-                y = LINEA_GOLPE - (offset + beat * seg_beat - t) * velocidad
+                cx = n[1] * ancho_carril + ancho_carril // 2
+                y = LINEA_GOLPE - (offset + n[0] * seg_beat - t) * velocidad
+                if n[3] > 0:
+                    y_fin = LINEA_GOLPE - (offset + (n[0] + n[3]) * seg_beat - t) * velocidad
+                    y_cab = min(y, LINEA_GOLPE) if n[4] else y
+                    if y_cab > -30 and y_fin < ALTO + 30:
+                        base = COLORES[n[1]]
+                        color_cola = base if n[4] else tuple(c // 2 + 40 for c in base)
+                        pygame.draw.rect(ctx.pantalla, color_cola,
+                                         (cx - 9, int(y_fin), 18, max(1, int(y_cab - y_fin))))
+                    y = y_cab
                 if -30 < y < ALTO + 30:
-                    pygame.draw.circle(ctx.pantalla, COLORES[carril],
-                                       (carril * ancho_carril + ancho_carril // 2, int(y)), 24)
+                    pygame.draw.circle(ctx.pantalla, COLORES[n[1]], (cx, int(y)), 24)
         texto(ctx, f"Puntaje {puntaje}   Combo {combo}", ctx.fuente, (255, 255, 255), 10, 10)
         texto(ctx, f"{cancion['titulo']}  |  Offset {offset:+.2f}s (flechas IZQ/DER)", ctx.chica, (170, 170, 190), 10, 45)
         if grabar:
@@ -422,7 +460,15 @@ def main():
         eleccion = menu(ctx, canciones, puntajes)
         if eleccion is None:
             break
-        cancion, grabar = eleccion
+        cancion, accion_menu = eleccion
+
+        if accion_menu == "editar":
+            import editor
+            if editor.editar(ctx, cancion) == "cerrar":
+                pygame.quit()
+                return
+            continue
+        grabar = accion_menu == "grabar"
 
         while True:
             res = jugar(ctx, cancion, grabar)
